@@ -1,0 +1,12 @@
+tensorflow==2.10
+numpy<2.0.0
+pandas
+matplotlib
+scikit-learn
+pillow
+fastapi
+uvicorn[standard]
+python-multipart
+jupyter
+streamlit
+seaborn

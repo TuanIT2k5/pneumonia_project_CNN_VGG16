@@ -1,0 +1,46 @@
+# Virtual environments
+venv/
+venv_gpu/
+env/
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment variables
+.env
+.env.local
+
+# Model files (large binary files)
+models/*.h5
+models/*.keras
+models/*.pkl
+models/weights/
+
+# Dataset / raw data
+data/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# IDE / editor
+.vscode/
+.idea/
+*.suo
+*.user
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
