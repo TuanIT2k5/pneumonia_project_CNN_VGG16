@@ -21,37 +21,101 @@ class NpEncoder(json.JSONEncoder):
         return super(NpEncoder, self).default(obj)
 
 from src.config import (
-    MODELS_DIR, EPOCHS_PHASE1, EPOCHS_PHASE2, FINE_TUNE_AT,
+    MODELS_DIR, EPOCHS_PHASE1, EPOCHS_PHASE2, FINE_TUNE_AT, USE_OVERSAMPLING,
+    EARLY_STOPPING_PATIENCE, REDUCE_LR_PATIENCE, REDUCE_LR_FACTOR, REDUCE_LR_MIN_DELTA,
 )
-from src.data_preprocessing import make_generators, get_class_weights
+from src.data_preprocessing import make_generators, make_oversampled_generator, get_class_weights
 from src.model import build_combined_model
 
 
 def get_callbacks(checkpoint_path):
     return [
-        callbacks.EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True),
-        callbacks.ModelCheckpoint(checkpoint_path, monitor="val_loss", save_best_only=True, save_weights_only=True),
-        callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=3, min_lr=1e-7),
+        callbacks.EarlyStopping(
+            monitor="val_auc",
+            mode="max",
+            patience=EARLY_STOPPING_PATIENCE,
+            min_delta=0.001,
+            restore_best_weights=True,
+            verbose=1,
+        ),
+        callbacks.ModelCheckpoint(
+            checkpoint_path, monitor="val_auc", mode="max",
+            save_best_only=True, save_weights_only=True, verbose=1,
+        ),
+        callbacks.ReduceLROnPlateau(
+            monitor="val_auc",
+            mode="max",
+            factor=REDUCE_LR_FACTOR,
+            patience=REDUCE_LR_PATIENCE,
+            min_delta=REDUCE_LR_MIN_DELTA,
+            min_lr=1e-7,
+            verbose=1,
+        ),
     ]
 
 
 def run_training():
     os.makedirs(MODELS_DIR, exist_ok=True)
-    train_gen, val_gen, test_gen = make_generators()
-    class_weights = get_class_weights(train_gen)
 
-    print("=== Huấn luyện mô hình (1 Giai đoạn duy nhất) ===")
-    # Khởi tạo mô hình và mở khóa luôn các layer cuối của VGG16 ngay từ đầu
-    model = build_combined_model(freeze_base=False, fine_tune_at=FINE_TUNE_AT)
+    steps_per_epoch = None  # None → Keras tự tính
+
+    if USE_OVERSAMPLING:
+        print("=== Chế độ: OVERSAMPLING NORMAL ===")
+        train_gen, val_gen, test_gen, steps_per_epoch = make_oversampled_generator()
+        # Với oversampling, không truyền class_weight (việc cân bằng đã nằm trong generator)
+        class_weights = None
+        # Lấy một train_gen thường để hiển thị class indices
+        _tmp_gen, _, _ = make_generators()
+        print("Class indices:", _tmp_gen.class_indices)
+    else:
+        print("=== Chế độ: CLASS WEIGHT BOOST ===")
+        train_gen, val_gen, test_gen = make_generators()
+        class_weights = get_class_weights(train_gen)
+
+    print("\n" + "="*50)
+    print("=== GIAI ĐOẠN 1: Đóng băng VGG16 (Warm-up) ===")
+    print("="*50)
+    # Khởi tạo mô hình ở chế độ freeze_base=True (chỉ train custom layers)
+    model = build_combined_model(freeze_base=True)
     model.summary()
 
-    # Gop chung số epoch của 2 phase cũ lại
-    total_epochs = EPOCHS_PHASE1 + EPOCHS_PHASE2
-    
-    history_obj = model.fit(
+    history_phase1 = model.fit(
         train_gen,
         validation_data=val_gen,
-        epochs=total_epochs,
+        epochs=EPOCHS_PHASE1,
+        steps_per_epoch=steps_per_epoch,  # None khi không oversample
+        class_weight=class_weights,
+        callbacks=get_callbacks(os.path.join(MODELS_DIR, "phase1_best.weights.h5")),
+        verbose=1,
+    )
+
+    print("\n" + "="*50)
+    print("=== GIAI ĐOẠN 2: Fine-Tuning VGG16 ===")
+    print("="*50)
+    
+    # Mở khóa VGG16 từ layer FINE_TUNE_AT
+    vgg_layer = model.get_layer("vgg16")
+    vgg_layer.trainable = True
+    for layer in vgg_layer.layers[:FINE_TUNE_AT]:
+        layer.trainable = False
+
+    # Compile lại mô hình sau khi unfreeze (bắt buộc)
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5),
+        loss="binary_crossentropy",
+        metrics=[
+            "accuracy", 
+            tf.keras.metrics.Precision(name="precision"),
+            tf.keras.metrics.Recall(name="recall"),
+            tf.keras.metrics.AUC(name="auc")
+        ]
+    )
+
+    history_phase2 = model.fit(
+        train_gen,
+        validation_data=val_gen,
+        epochs=EPOCHS_PHASE2,
+        steps_per_epoch=steps_per_epoch,
         class_weight=class_weights,
         callbacks=get_callbacks(os.path.join(MODELS_DIR, "final_best.weights.h5")),
         verbose=1,
@@ -60,10 +124,12 @@ def run_training():
     # Lưu mô hình cuối cùng + lịch sử train (để notebook vẽ biểu đồ)
     model.save(os.path.join(MODELS_DIR, "final_model.h5"))
     
-    # Ép kiểu float32 (numpy) thành native float để ghi vào JSON
+    # Nối history 2 phase với nhau ép thành native float
     history_dict = {}
-    for key in history_obj.history:
-        history_dict[key] = [float(v) for v in history_obj.history[key]]
+    for key in history_phase1.history:
+        h1 = [float(v) for v in history_phase1.history[key]]
+        h2 = [float(v) for v in history_phase2.history[key]]
+        history_dict[key] = h1 + h2
         
     with open(os.path.join(MODELS_DIR, "training_history.json"), "w") as f:
         json.dump(history_dict, f, cls=NpEncoder)
