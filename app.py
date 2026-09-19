@@ -181,24 +181,59 @@ st.markdown("""
 # ---------------------------------------------------------
 @st.cache_resource
 def load_pneumonia_model():
-    """Load model cached in memory."""
-    model_path = os.path.join(MODELS_DIR, "final_model.h5")
-    if os.path.exists(model_path):
+    # Tìm model .keras hoặc .h5 mới nhất, bao gồm cả thư mục con
+    candidate_paths = [
+        os.path.join(MODELS_DIR, "final_model.keras"),
+        os.path.join(MODELS_DIR, "final_model.h5"),
+        os.path.join(os.path.dirname(MODELS_DIR), "pneumonia_project", "models", "final_model.keras"),
+        os.path.join(os.path.dirname(MODELS_DIR), "pneumonia_project", "models", "final_model.h5"),
+    ]
+    best_path = None
+    best_mtime = 0
+    for p in candidate_paths:
+        if os.path.exists(p):
+            mtime = os.path.getmtime(p)
+            if mtime > best_mtime:
+                best_mtime = mtime
+                best_path = p
+
+    if best_path:
         try:
-            model = tf.keras.models.load_model(model_path)
-            return model, model_path
+            model = tf.keras.models.load_model(best_path)
+            return model, best_path
         except Exception as e:
             st.error(f"Lỗi khi load mô hình: {e}")
             return None, None
     return None, None
 
 
-def get_image_prediction(img_pil, model):
+def _get_outputs_dir_for_model(model_path):
+    """Trả về thư mục outputs/ tương ứng với model_path đang được dùng."""
+    model_models_dir = os.path.dirname(model_path)
+    base = os.path.dirname(model_models_dir)
+    return os.path.join(base, "outputs")
+
+
+def get_optimal_threshold():
+    """Load ngưỡng tối ưu Youden's J đã lưu từ lần evaluate gần nhất."""
+    npz_path = os.path.join(OUTPUTS_DIR, "raw_predictions.npz")
+    if os.path.exists(npz_path):
+        try:
+            data = np.load(npz_path)
+            fpr, tpr = data["fpr"], data["tpr"]
+            J = tpr - fpr
+            idx = np.argmax(J)
+            # roc_thresholds không lưu trực tiếp — dùng prob threshold tính gần đúng
+        except Exception:
+            pass
+    return 0.5
+
+
+def get_image_prediction(img_pil, model, threshold=0.5):
     """Tiền xử lý ảnh (crop 8% margin + VGG preprocess) và đưa ra dự đoán."""
-    # Convert PIL Image to numpy array
     img_rgb = img_pil.convert("RGB")
     w, h = img_rgb.size
-    
+
     # Margin crop 8%
     crop_percent = 0.08
     crop_box = (
@@ -209,19 +244,21 @@ def get_image_prediction(img_pil, model):
     )
     img_cropped = img_rgb.crop(crop_box)
     img_resized = img_cropped.resize(IMG_SIZE)
-    
+
     arr = np.array(img_resized, dtype=np.float32)
     arr_expanded = np.expand_dims(arr, axis=0)
     arr_preprocessed = vgg_preprocess(arr_expanded.copy())
-    
+
     prob = float(model.predict(arr_preprocessed, verbose=0)[0][0])
-    label = "PNEUMONIA" if prob >= 0.5 else "NORMAL"
-    confidence = prob if prob >= 0.5 else (1.0 - prob)
-    
+
+    label = "PNEUMONIA" if prob >= threshold else "NORMAL"
+    confidence = prob if prob >= threshold else (1.0 - prob)
+
     return {
         "label": label,
         "prob": prob,
         "confidence": confidence,
+        "threshold": threshold,
         "img_cropped": img_cropped,
         "arr_preprocessed": arr_preprocessed
     }
@@ -243,7 +280,7 @@ with st.sidebar:
         "Điều hướng hệ thống:",
         [
             "🩺 Chẩn đoán & Grad-CAM (Inference)",
-            "⚡ Huấn luyện mô hình (Training Studio)",
+            "📈 Lịch sử & Kết quả Huấn luyện",
             "📊 Đánh giá & Analytics (Evaluation)",
             "📂 Khám phá dữ liệu (Dataset EDA)"
         ],
@@ -266,9 +303,17 @@ with st.sidebar:
         st.markdown("""
         <div style='background: rgba(255, 23, 68, 0.1); border: 1px solid rgba(255, 23, 68, 0.3); padding: 12px; border-radius: 10px;'>
             <span style='color: #ff1744; font-weight: bold;'>● No Saved Model Found</span><br/>
-            <small style='color: #94a3b8;'>Vui lòng chạy Huấn luyện ở tab Training Studio.</small>
+            <small style='color: #94a3b8;'>Vui lòng huấn luyện mô hình qua Jupyter Notebook.</small>
         </div>
         """, unsafe_allow_html=True)
+
+    # Nút reload model từ disk (dùng sau khi train xong từ notebook)
+    st.divider()
+    if st.button("🔁 Tải Lại Model Mới Nhất", use_container_width=True,
+                 help="Xóa cache RAM và load lại model mới nhất từ disk (dùng sau khi train từ notebook)"):
+        st.cache_resource.clear()
+        st.success("✅ Đã xóa cache! Model sẽ được load lại ở lần thao tác tiếp theo.")
+        st.rerun()
 
     # GPU Status Card
     st.divider()
@@ -304,7 +349,7 @@ if "Chẩn đoán" in selected_nav:
     """, unsafe_allow_html=True)
 
     if model is None:
-        st.warning("⚠️ Không tìm thấy file mô hình `models/final_model.h5`. Hãy qua tab '⚡ Huấn luyện mô hình' để huấn luyện trước!")
+        st.warning("⚠️ Không tìm thấy file mô hình `models/final_model...`. Hãy chạy huấn luyện qua Jupyter Notebook trước!")
     else:
         col_input, col_result = st.columns([1, 1], gap="large")
 
@@ -341,7 +386,7 @@ if "Chẩn đoán" in selected_nav:
                         sample_img_name = chosen_file
 
             if selected_img is not None:
-                st.image(selected_img, caption=f"Ảnh đầu vào: {sample_img_name}", use_column_width=True)
+                st.image(selected_img, caption=f"Ảnh đầu vào: {sample_img_name}", use_container_width=True)
             st.markdown("</div>", unsafe_allow_html=True)
 
         with col_result:
@@ -387,14 +432,14 @@ if "Chẩn đoán" in selected_nav:
                 alpha = st.slider("Độ trong suốt bản đồ nhiệt (Heatmap Alpha):", 0.1, 0.9, 0.4, 0.05)
 
                 try:
-                    heatmap = make_gradcam_heatmap(arr_preprocessed, model, last_conv_layer_name="custom_conv2")
+                    heatmap = make_gradcam_heatmap(arr_preprocessed, model, last_conv_layer_name="block5_conv3")
                     superimposed_img = overlay_gradcam(img_cropped, heatmap, alpha=alpha, img_size=IMG_SIZE)
 
                     cam_col1, cam_col2 = st.columns(2)
                     with cam_col1:
-                        st.image(img_cropped, caption="Ảnh sau Margin Crop (8%)", use_column_width=True)
+                        st.image(img_cropped, caption="Ảnh sau Margin Crop (8%)", use_container_width=True)
                     with cam_col2:
-                        st.image(superimposed_img, caption="Ảnh Grad-CAM Overlay", use_column_width=True)
+                        st.image(superimposed_img, caption="Ảnh Grad-CAM Overlay", use_container_width=True)
                 except Exception as ex:
                     st.error(f"Không thể tạo bản đồ Grad-CAM: {ex}")
 
@@ -404,76 +449,41 @@ if "Chẩn đoán" in selected_nav:
 
 
 # ---------------------------------------------------------
-# Page 2: ⚡ Huấn luyện mô hình (Training Studio)
+# Page 2: 📈 Lịch sử & Kết quả Huấn luyện
 # ---------------------------------------------------------
-elif "Huấn luyện" in selected_nav:
+elif "Lịch sử" in selected_nav:
     st.markdown("""
     <div class='ai-header'>
-        <h1 class='ai-title'>⚡ Model Training Studio (Quy Trình Huấn Luyện 2 Giai Đoạn)</h1>
-        <p class='ai-subtitle'>Huấn luyện mô hình VGG16 + Custom CNN Head trực tiếp với bộ tham số tùy chỉnh.</p>
+        <h1 class='ai-title'>📈 Lịch Sử & Kết Quả Huấn Luyện (Notebook Results)</h1>
+        <p class='ai-subtitle'>Hiển thị các biểu đồ và báo cáo đánh giá được sinh ra từ quá trình huấn luyện trong Jupyter Notebook.</p>
     </div>
     """, unsafe_allow_html=True)
 
-    col_config, col_status = st.columns([1, 1], gap="large")
-
-    with col_config:
-        st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
-        st.subheader("⚙️ Cấu Hình Siêu Tham Số (Hyperparameters)")
+    if model_path is None:
+        st.warning("⚠️ Chưa có mô hình nào được load. Vui lòng huấn luyện mô hình trước qua Notebook!")
+    else:
+        active_outputs_dir = _get_outputs_dir_for_model(model_path)
+        active_models_dir = os.path.dirname(model_path)
         
-        ep1 = st.number_input("Số Epoch Giai đoạn 1 (Đóng băng VGG16 Base):", min_value=1, max_value=50, value=EPOCHS_PHASE1)
-        ep2 = st.number_input("Số Epoch Giai đoạn 2 (Fine-tuning VGG16):", min_value=0, max_value=50, value=EPOCHS_PHASE2)
-        batch_sz = st.selectbox("Batch Size:", [16, 32, 64], index=1)
-        
-        st.info("💡 **Giai đoạn 1:** Chỉ huấn luyện Custom CNN Head ($LR = 10^{-4}$).\n"
-                "💡 **Giai đoạn 2:** Fine-tune mở khóa các tầng cuối VGG16 ($LR = 10^{-5}$).")
-
-        train_btn = st.button("🚀 Bắt Đầu Huấn Luyện Mô Hình", use_container_width=True, type="primary")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with col_status:
         st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
-        st.subheader("📈 Tiến Độ & Nhật Ký Huấn Luyện")
-
-        if train_btn:
-            st.write("🔄 Đang khởi tạo data generators & tính toán class weights...")
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-
-            try:
-                status_text.text("🚀 Đang thực thi Phase 1 & Phase 2 training pipeline...")
-                progress_bar.progress(30)
-                
-                # Thực thi huấn luyện
-                trained_mod, hist_dict, test_gen = run_training()
-                progress_bar.progress(90)
-
-                # Lưu biểu đồ
-                plot_path = os.path.join(MODELS_DIR, "training_curves.png")
-                plot_training_history(hist_dict, save_path=plot_path)
-                progress_bar.progress(100)
-
-                st.success("✅ Huấn luyện thành công! Mô hình đã lưu tại `models/final_model.h5`")
-                
-                # Dynamic cache clear
-                st.cache_resource.clear()
-
-                if os.path.exists(plot_path):
-                    st.image(plot_path, caption="Biểu đồ Loss & Accuracy sau khi train", use_column_width=True)
-
-            except Exception as e:
-                st.error(f"Lỗi trong quá trình huấn luyện: {e}")
+        st.subheader("Khu vực hiển thị kết quả tĩnh từ Notebook")
+        st.info(f"Đang đọc dữ liệu từ: `{active_models_dir}` và `{active_outputs_dir}`")
+        
+        plot_path = os.path.join(active_models_dir, "training_curves.png")
+        if os.path.exists(plot_path):
+            st.markdown("### Biểu đồ Loss & Accuracy")
+            from PIL import Image as PILImage
+            st.image(PILImage.open(plot_path), use_container_width=True)
         else:
-            hist_path = os.path.join(MODELS_DIR, "history.json")
-            plot_path = os.path.join(MODELS_DIR, "training_curves.png")
-
-            if os.path.exists(plot_path):
-                st.write("📊 Biểu đồ lịch sử huấn luyện lần gần nhất:")
-                st.image(plot_path, use_column_width=True)
-            else:
-                st.write("Chưa có lịch sử huấn luyện nào. Nhấn nút bên trái để khởi chạy.")
-        
+            st.write("Chưa tìm thấy biểu đồ `training_curves.png`.")
+            
+        report_path = os.path.join(active_outputs_dir, "classification_report.txt")
+        if os.path.exists(report_path):
+            st.markdown("### Báo Cáo Phân Loại (Classification Report)")
+            with open(report_path, "r", encoding="utf-8") as f:
+                st.text(f.read())
+                
         st.markdown("</div>", unsafe_allow_html=True)
-
 
 # ---------------------------------------------------------
 # Page 3: 📊 Đánh giá & Analytics (Evaluation Dashboard)
@@ -490,13 +500,24 @@ elif "Đánh giá" in selected_nav:
         st.warning("⚠️ Chưa có mô hình nào được load. Vui lòng huấn luyện mô hình trước!")
     else:
         st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
+        st.info("💡 Nếu vừa train xong từ notebook, nhấn **'🔁 Tải Lại Model Mới Nhất'** ở sidebar trước, rồi mới đánh giá.")
         if st.button("🔄 Thực Thi Đánh Giá Trên Tập Test", type="primary"):
-            with st.spinner("Đang chạy dự đoán trên toàn bộ tập Test..."):
-                _, _, test_gen = make_generators()
-                eval_res = evaluate_on_test(model, test_gen, save_dir=OUTPUTS_DIR)
-                st.session_state["eval_res"] = eval_res
-                st.session_state["test_gen"] = test_gen
-                st.success("✅ Đánh giá hoàn tất!")
+            # Xóa cache và load lại model mới nhất
+            st.cache_resource.clear()
+            fresh_model, fresh_model_path = load_pneumonia_model()
+            if fresh_model is None:
+                st.error("Không tìm thấy file model. Hãy train trước!")
+            else:
+                active_outputs_dir = _get_outputs_dir_for_model(fresh_model_path)
+                os.makedirs(active_outputs_dir, exist_ok=True)
+                with st.spinner(f"Đang dùng model tại '{fresh_model_path}'..."):
+                    _, _, test_gen = make_generators()
+                    eval_res = evaluate_on_test(fresh_model, test_gen, save_dir=active_outputs_dir, show=False)
+                    st.session_state["eval_res"] = eval_res
+                    st.session_state["test_gen"] = test_gen
+                    st.session_state["active_outputs_dir"] = active_outputs_dir
+                    st.session_state["optimal_threshold"] = float(eval_res["optimal_threshold"])
+                    st.success(f"✅ Đánh giá hoàn tất! (Model: {fresh_model_path}) — Threshold tối ưu: {eval_res['optimal_threshold']:.4f}")
         st.markdown("</div>", unsafe_allow_html=True)
 
         if "eval_res" in st.session_state:
@@ -506,39 +527,51 @@ elif "Đánh giá" in selected_nav:
             y_true = res["y_true"]
             y_pred = res["y_pred"]
             y_prob = res["y_prob"]
-            metrics = res["metrics"]
+            auc_score = res["auc"]
+
+            from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score as f1_score_fn
+            acc  = accuracy_score(y_true, y_pred)
+            prec = precision_score(y_true, y_pred, zero_division=0)
+            rec  = recall_score(y_true, y_pred, zero_division=0)
+            f1   = f1_score_fn(y_true, y_pred, zero_division=0)
 
             # Key Metrics Display
             st.markdown("### 🏆 Các Chỉ Số Cốt Lõi (Performance Metrics)")
             m1, m2, m3, m4, m5 = st.columns(5)
             with m1:
-                st.markdown(f"<div class='metric-container'><div class='metric-val'>{metrics['accuracy']*100:.1f}%</div><div class='metric-lbl'>Accuracy</div></div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='metric-container'><div class='metric-val'>{acc*100:.1f}%</div><div class='metric-lbl'>Accuracy</div></div>", unsafe_allow_html=True)
             with m2:
-                st.markdown(f"<div class='metric-container'><div class='metric-val'>{metrics['precision']*100:.1f}%</div><div class='metric-lbl'>Precision</div></div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='metric-container'><div class='metric-val'>{prec*100:.1f}%</div><div class='metric-lbl'>Precision</div></div>", unsafe_allow_html=True)
             with m3:
-                st.markdown(f"<div class='metric-container'><div class='metric-val'>{metrics['recall']*100:.1f}%</div><div class='metric-lbl'>Recall (Sens)</div></div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='metric-container'><div class='metric-val'>{rec*100:.1f}%</div><div class='metric-lbl'>Recall (Sens)</div></div>", unsafe_allow_html=True)
             with m4:
-                st.markdown(f"<div class='metric-container'><div class='metric-val'>{metrics['f1_score']*100:.1f}%</div><div class='metric-lbl'>F1-Score</div></div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='metric-container'><div class='metric-val'>{f1*100:.1f}%</div><div class='metric-lbl'>F1-Score</div></div>", unsafe_allow_html=True)
             with m5:
-                st.markdown(f"<div class='metric-container'><div class='metric-val'>{metrics['auc_score']:.3f}</div><div class='metric-lbl'>ROC-AUC</div></div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='metric-container'><div class='metric-val'>{auc_score:.3f}</div><div class='metric-lbl'>ROC-AUC</div></div>", unsafe_allow_html=True)
+
 
             st.divider()
+
+            # Dùng outputs_dir tương ứng với model đã load
+            _out_dir = st.session_state.get("active_outputs_dir", _get_outputs_dir_for_model(model_path) if model_path else OUTPUTS_DIR)
 
             col_cm, col_roc = st.columns(2)
             with col_cm:
                 st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
                 st.subheader("📌 Ma Trận Nhầm Lẫn (Confusion Matrix)")
-                cm_img = os.path.join(OUTPUTS_DIR, "confusion_matrix.png")
+                cm_img = os.path.join(_out_dir, "confusion_matrix.png")
                 if os.path.exists(cm_img):
-                    st.image(cm_img, use_column_width=True)
+                    from PIL import Image as PILImage
+                    st.image(PILImage.open(cm_img), use_container_width=True)
                 st.markdown("</div>", unsafe_allow_html=True)
 
             with col_roc:
                 st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
                 st.subheader("📈 Đường Cong ROC (ROC Curve)")
-                roc_img = os.path.join(OUTPUTS_DIR, "roc_curve.png")
+                roc_img = os.path.join(_out_dir, "roc_curve.png")
                 if os.path.exists(roc_img):
-                    st.image(roc_img, use_column_width=True)
+                    from PIL import Image as PILImage
+                    st.image(PILImage.open(roc_img), use_container_width=True)
                 st.markdown("</div>", unsafe_allow_html=True)
 
             # Error Analysis Section
@@ -562,7 +595,7 @@ elif "Đánh giá" in selected_nav:
 
                     with cols[i % 3]:
                         if os.path.exists(full_path):
-                            st.image(full_path, caption=f"Thực tế: {true_lbl} | Dự đoán: {pred_lbl} ({prob_val:.2f})", use_column_width=True)
+                            st.image(full_path, caption=f"Thực tế: {true_lbl} | Dự đoán: {pred_lbl} ({prob_val:.2f})", use_container_width=True)
             st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -622,7 +655,7 @@ elif "Khám phá" in selected_nav:
 
             c1, c2 = st.columns(2)
             with c1:
-                st.image(orig_img, caption="Ảnh gốc (Có viền nhiễu)", use_column_width=True)
+                st.image(orig_img, caption="Ảnh gốc (Có viền nhiễu)", use_container_width=True)
             with c2:
-                st.image(cropped_arr.astype(np.uint8), caption=f"Sau Margin Crop ({crop_slider*100:.0f}%)", use_column_width=True)
+                st.image(cropped_arr.astype(np.uint8), caption=f"Sau Margin Crop ({crop_slider*100:.0f}%)", use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)

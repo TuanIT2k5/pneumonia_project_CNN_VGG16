@@ -62,11 +62,10 @@ streamlit run app.py
 python main.py --mode app
 ```
 
-Giao diện Streamlit cao cấp chủ đề **AI Cyberpunk Dark Mode** tích hợp đầy đủ 4 tính năng:
+Giao diện Streamlit cao cấp chủ đề **AI Cyberpunk Dark Mode** tích hợp đầy đủ 3 tính năng:
 1. **Chẩn đoán & Grad-CAM (Inference & XAI):** Upload ảnh X-quang hoặc chọn mẫu test, hiển thị kết quả chẩn đoán + bản đồ nhiệt Grad-CAM giải thích vùng chú ý của AI.
-2. **Training Studio:** Huấn luyện mô hình 2 giai đoạn (Phase 1 & Phase 2) với các siêu tham số tùy chỉnh trực quan.
-3. **Đánh giá & Analytics:** Đánh giá các chỉ số Accuracy, Precision, Recall, F1, ROC-AUC, Confusion Matrix & phân tích các ca dự đoán sai (Error Cases).
-4. **Khám phá Dữ liệu (EDA & Margin Crop):** Thống kê dữ liệu & xem thử tác dụng loại bỏ viền nhiễu của Margin Crop.
+2. **Đánh giá & Analytics:** Đánh giá các chỉ số Accuracy, Precision, Recall, F1, ROC-AUC, Confusion Matrix & phân tích các ca dự đoán sai (Error Cases).
+3. **Khám phá Dữ liệu (EDA & Margin Crop):** Thống kê dữ liệu & xem thử tác dụng loại bỏ viền nhiễu của Margin Crop.
 
 ## Chạy notebook (khuyến nghị dùng để làm báo cáo, vì có sẵn biểu đồ + Grad-CAM)
 
